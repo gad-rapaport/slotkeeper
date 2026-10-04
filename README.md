@@ -9,6 +9,19 @@ hold the same slot: the database itself refuses overlapping reservations, and th
 **Specialisation shown:** Backend engineering: transactions, concurrency and API design, with integration tests
 that race real requests against PostgreSQL.
 
+## Product film
+
+[![Play the 20-second Slotkeeper product film](docs/media/poster.jpg)](https://github.com/gad-rapaport/slotkeeper/releases/download/v0.1.0/slotkeeper-film.mp4)
+
+20 seconds, no sound needed: two people press Book on the same slot at the same moment, the database lets one
+in, the other gets a clear 409 and a free slot, and thirty simultaneous requests still produce one booking.
+[Download or play the MP4](https://github.com/gad-rapaport/slotkeeper/releases/download/v0.1.0/slotkeeper-film.mp4)
+(release asset; needs access to this repository while it is private). Made from code in
+[animation/](animation/): [brief](docs/ANIMATION-BRIEF.md), [storyboard](docs/ANIMATION-STORYBOARD.md),
+[rendering](docs/ANIMATION-RENDERING.md).
+
+![Looping preview of the film: one request locks the slot, the other is turned away](docs/media/preview.webp)
+
 ## What it does
 
 - Browse resources per office and type; see a day or week schedule in the office's own time zone.
