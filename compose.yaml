@@ -1,0 +1,122 @@
+# Slotkeeper demo stack (production build, Slim defaults).
+#   docker compose up -d --build          start
+#   docker compose --profile tools run --rm seed   load demo data
+# See docs/SETUP.md and docs/SLIM.md.
+name: slotkeeper
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 5m
+    max-file: '2'
+
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: slotkeeper
+      POSTGRES_USER: slotkeeper
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+    # Small-footprint tuning for a demo dataset of a few thousand rows.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=48MB
+      - -c
+      - max_connections=20
+      - -c
+      - work_mem=4MB
+      - -c
+      - maintenance_work_mem=32MB
+      - -c
+      - log_min_duration_statement=500
+    volumes:
+      - db-data:/var/lib/postgresql
+    networks: [backend]
+    shm_size: 64mb
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U slotkeeper -d slotkeeper']
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+    restart: on-failure:3
+    read_only: true
+    tmpfs:
+      - /var/run/postgresql
+      - /tmp
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    security_opt: ['no-new-privileges:true']
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 256M
+          pids: 100
+    logging: *logging
+
+  app:
+    build: .
+    image: slotkeeper:${IMAGE_TAG:-local}
+    environment:
+      DATABASE_URL: postgres://slotkeeper:${POSTGRES_PASSWORD}@db:5432/slotkeeper
+      DB_POOL_MAX: '8'
+      BOOKING_RATE_LIMIT_PER_MINUTE: ${BOOKING_RATE_LIMIT_PER_MINUTE:-30}
+      MIGRATE_ON_START: 'true'
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOGIN_RATE_LIMIT_PER_MINUTE: ${LOGIN_RATE_LIMIT_PER_MINUTE:-10}
+      UV_THREADPOOL_SIZE: '2'
+      NODE_OPTIONS: --max-old-space-size=160
+    ports:
+      - '127.0.0.1:8103:3103'
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [backend, edge]
+    restart: on-failure:3
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 256M
+          pids: 100
+    logging: *logging
+
+  # One-shot tasks share the app image. Not started by `up`.
+  seed:
+    profiles: [tools]
+    image: slotkeeper:${IMAGE_TAG:-local}
+    command: ['dist/server/cli.js', 'seed']
+    environment:
+      DATABASE_URL: postgres://slotkeeper:${POSTGRES_PASSWORD}@db:5432/slotkeeper
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:?set in .env}
+      SEED_MEMBER_PASSWORD: ${SEED_MEMBER_PASSWORD:?set in .env}
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [backend]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 256M
+    logging: *logging
+
+volumes:
+  db-data:
+
+networks:
+  # No route out of this network: only the app can reach the database.
+  backend:
+    internal: true
+  edge: {}
