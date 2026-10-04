@@ -1,0 +1,423 @@
+openapi: 3.1.0
+info:
+  title: Slotkeeper API
+  version: 0.1.0
+  description: |
+    Booking for rooms, desks and equipment. Overlapping active reservations of one resource are impossible:
+    the database rejects them with an exclusion constraint, and the API answers 409 SLOT_TAKEN.
+
+    Authentication is a session cookie from POST /api/auth/login. Every state-changing request must also
+    send the X-CSRF-Token returned by login or the session probe. Times are ISO 8601 instants with an
+    offset; local wall-clock rules (opening hours, days) are evaluated in each site's IANA time zone.
+servers:
+  - url: http://127.0.0.1:8103
+security:
+  - session: []
+tags:
+  - name: auth
+  - name: catalog
+  - name: bookings
+  - name: maintenance
+paths:
+  /api/auth/login:
+    post:
+      tags: [auth]
+      security: []
+      summary: Sign in
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string }
+                password: { type: string }
+      responses:
+        '200':
+          description: Signed in; sets the sk_session cookie.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Session' }
+        '401': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+  /api/auth/logout:
+    post:
+      tags: [auth]
+      summary: Sign out
+      parameters: [{ $ref: '#/components/parameters/Csrf' }]
+      responses:
+        '204': { description: Signed out }
+  /api/auth/session:
+    get:
+      tags: [auth]
+      security: []
+      summary: Session probe (always 200)
+      responses:
+        '200':
+          description: Current user and CSRF token, or nulls when signed out.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Session' }
+  /api/sites:
+    get:
+      tags: [catalog]
+      summary: Sites with their time zones
+      responses:
+        '200':
+          description: Sites
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string, format: uuid }
+                        name: { type: string }
+                        timezone: { type: string, examples: [Asia/Jerusalem] }
+                        resources: { type: integer }
+  /api/resources:
+    get:
+      tags: [catalog]
+      summary: Bookable resources
+      parameters:
+        - { name: siteId, in: query, schema: { type: string, format: uuid } }
+        - { name: kind, in: query, schema: { type: string, enum: [room, desk, equipment] } }
+      responses:
+        '200':
+          description: Resources
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Resource' } }
+  /api/resources/{id}:
+    get:
+      tags: [catalog]
+      summary: One resource
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200':
+          description: Resource
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Resource' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/resources/{id}/availability:
+    get:
+      tags: [catalog]
+      summary: Slot grid for 1-7 local days
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - name: date
+          in: query
+          description: First local date (YYYY-MM-DD) in the site's time zone. Defaults to today there.
+          schema: { type: string, format: date }
+        - { name: days, in: query, schema: { type: integer, minimum: 1, maximum: 7, default: 1 } }
+      responses:
+        '200':
+          description: Availability
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  resource: { $ref: '#/components/schemas/Resource' }
+                  today: { type: string, format: date }
+                  days: { type: array, items: { $ref: '#/components/schemas/Day' } }
+        '400': { $ref: '#/components/responses/Error' }
+  /api/bookings:
+    get:
+      tags: [bookings]
+      summary: The caller's bookings
+      parameters:
+        - { name: scope, in: query, schema: { type: string, enum: [upcoming, past], default: upcoming } }
+      responses:
+        '200':
+          description: Bookings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Reservation' } }
+    post:
+      tags: [bookings]
+      summary: Create a booking (idempotent)
+      description: |
+        The Idempotency-Key header is required. Repeating a request with the same key and body returns the
+        original 201 response with `Idempotent-Replayed: true` and creates nothing. The same key with a
+        different body is rejected with 422. Keys are kept for 24 hours.
+      parameters:
+        - { $ref: '#/components/parameters/Csrf' }
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, pattern: '^[A-Za-z0-9_-]{8,100}$' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [resourceId, start, end]
+              properties:
+                resourceId: { type: string, format: uuid }
+                start: { type: string, format: date-time, examples: ['2026-10-05T09:00:00+03:00'] }
+                end: { type: string, format: date-time }
+                title: { type: string, maxLength: 120 }
+      responses:
+        '201':
+          description: Created (or replayed)
+          headers:
+            Idempotent-Replayed: { schema: { type: string, enum: ['true'] } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Reservation' }
+        '400': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/SlotTaken' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+  /api/bookings/{id}:
+    get:
+      tags: [bookings]
+      summary: One booking (own bookings, or any for admins)
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200':
+          description: Booking
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Reservation' }
+        '404': { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [bookings]
+      summary: Reschedule or rename
+      parameters: [{ $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/Csrf' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expectedVersion, start, end]
+              properties:
+                expectedVersion: { type: integer }
+                start: { type: string, format: date-time }
+                end: { type: string, format: date-time }
+                title: { type: string, maxLength: 120 }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Reservation' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/SlotTaken' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/bookings/{id}/cancel:
+    post:
+      tags: [bookings]
+      summary: Cancel a booking or remove a maintenance block
+      parameters: [{ $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/Csrf' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expectedVersion]
+              properties:
+                expectedVersion: { type: integer }
+      responses:
+        '200':
+          description: Cancelled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Reservation' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/resources/{id}/maintenance:
+    post:
+      tags: [maintenance]
+      summary: Block a resource for maintenance (admin)
+      parameters: [{ $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/Csrf' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [start, end, reason]
+              properties:
+                start: { type: string, format: date-time }
+                end: { type: string, format: date-time }
+                reason: { type: string, minLength: 3, maxLength: 120 }
+                cancelConflicting:
+                  type: boolean
+                  default: false
+                  description: Cancel overlapping bookings in the same transaction instead of failing.
+      responses:
+        '201':
+          description: Block created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Reservation' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/SlotTaken' }
+  /api/activity:
+    get:
+      tags: [bookings]
+      summary: Recent activity (own; admins may pass all=true)
+      parameters:
+        - { name: all, in: query, schema: { type: string, enum: ['true'] } }
+      responses:
+        '200': { description: Activity entries }
+  /api/openapi.yaml:
+    get:
+      security: []
+      summary: This document
+      responses:
+        '200': { description: OpenAPI document }
+  /healthz:
+    get:
+      security: []
+      responses:
+        '200': { description: Process up }
+  /readyz:
+    get:
+      security: []
+      responses:
+        '200': { description: Database reachable }
+        '503': { description: Database unreachable }
+components:
+  securitySchemes:
+    session:
+      type: apiKey
+      in: cookie
+      name: sk_session
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Csrf:
+      name: X-CSRF-Token
+      in: header
+      required: true
+      schema: { type: string }
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    SlotTaken:
+      description: The time overlaps an active reservation. `details.conflicts` lists what is in the way.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    Error:
+      type: object
+      required: [error, requestId]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                [
+                  VALIDATION_FAILED,
+                  UNAUTHENTICATED,
+                  FORBIDDEN,
+                  CSRF_REJECTED,
+                  NOT_FOUND,
+                  SLOT_TAKEN,
+                  VERSION_CONFLICT,
+                  BOOKING_RULE,
+                  IDEMPOTENCY_KEY_REQUIRED,
+                  IDEMPOTENCY_KEY_REUSED,
+                  LIMIT_REACHED,
+                  RATE_LIMITED,
+                  INTERNAL,
+                ]
+            message: { type: string }
+            details: { type: object }
+        requestId: { type: string }
+    Session:
+      type: object
+      properties:
+        user:
+          oneOf:
+            - type: 'null'
+            - type: object
+              properties:
+                id: { type: string, format: uuid }
+                email: { type: string }
+                fullName: { type: string }
+                role: { type: string, enum: [admin, member] }
+        csrfToken: { type: [string, 'null'] }
+    Resource:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        siteId: { type: string, format: uuid }
+        siteName: { type: string }
+        timezone: { type: string }
+        kind: { type: string, enum: [room, desk, equipment] }
+        name: { type: string }
+        description: { type: string }
+        capacity: { type: [integer, 'null'] }
+        slotMinutes: { type: integer }
+        minMinutes: { type: integer }
+        maxMinutes: { type: integer }
+    Reservation:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        resourceId: { type: string, format: uuid }
+        resourceName: { type: string }
+        siteName: { type: string }
+        timezone: { type: string }
+        kind: { type: string, enum: [booking, maintenance] }
+        status: { type: string, enum: [active, cancelled] }
+        start: { type: string, format: date-time }
+        end: { type: string, format: date-time }
+        localDate: { type: string, format: date }
+        localStart: { type: string, examples: ['09:00'] }
+        localEnd: { type: string }
+        title: { type: [string, 'null'], description: Null when the caller may not see it. }
+        mine: { type: boolean }
+        userName: { type: [string, 'null'] }
+        version: { type: integer }
+    Day:
+      type: object
+      properties:
+        date: { type: string, format: date }
+        weekday: { type: integer, minimum: 1, maximum: 7 }
+        open: { type: boolean }
+        opens: { type: [string, 'null'] }
+        closes: { type: [string, 'null'] }
+        dayLengthHours: { type: integer, description: 23 or 25 on daylight saving change days }
+        slots:
+          type: array
+          items:
+            type: object
+            properties:
+              start: { type: string, format: date-time }
+              end: { type: string, format: date-time }
+              localStart: { type: string }
+              state: { type: string, enum: [free, booked, mine, maintenance, past] }
+              reservationId: { type: [string, 'null'] }
+        reservations: { type: array, items: { $ref: '#/components/schemas/Reservation' } }
