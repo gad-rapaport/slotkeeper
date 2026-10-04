@@ -4,7 +4,16 @@ import reactHooks from 'eslint-plugin-react-hooks';
 import globals from 'globals';
 
 export default tseslint.config(
-  { ignores: ['dist/**', 'node_modules/**', 'playwright-report/**', 'test-results/**', 'backups/**'] },
+  {
+    ignores: [
+      'dist/**',
+      'node_modules/**',
+      'playwright-report/**',
+      'test-results/**',
+      'backups/**',
+      'animation/out/**',
+    ],
+  },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
@@ -25,6 +34,16 @@ export default tseslint.config(
       '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
       'no-console': ['error', { allow: ['warn', 'error'] }],
     },
+  },
+  {
+    // Product film sources: classic browser scripts sharing the Motion global, and a Node render script.
+    files: ['animation/**/*.js'],
+    languageOptions: { sourceType: 'script', globals: { ...globals.browser, Motion: 'writable' } },
+  },
+  {
+    files: ['animation/**/*.mjs'],
+    languageOptions: { globals: globals.node },
+    rules: { 'no-console': 'off' },
   },
   {
     files: ['server/src/cli.ts', 'tests/**/*.ts', 'scripts/**/*.{js,mjs,ts}'],
